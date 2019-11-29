@@ -137,6 +137,7 @@ public class DefaultSchemaValidator implements SchemaValidator
             }
         }
 
+        // TODO: remove it from here and make expressions be embedded objects
         if ( ValidationRule.class.isInstance( object ) )
         {
             ValidationRule rule = (ValidationRule) object;
