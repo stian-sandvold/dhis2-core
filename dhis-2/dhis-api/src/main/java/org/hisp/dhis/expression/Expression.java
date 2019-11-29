@@ -56,7 +56,7 @@ import java.io.Serializable;
  */
 @JacksonXmlRootElement( localName = "expression", namespace = DxfNamespaces.DXF_2_0 )
 public class Expression
-    implements Serializable, EmbeddedObject
+    implements Serializable
 {
     /**
      * Determines if a de-serialized file is compatible with this class.

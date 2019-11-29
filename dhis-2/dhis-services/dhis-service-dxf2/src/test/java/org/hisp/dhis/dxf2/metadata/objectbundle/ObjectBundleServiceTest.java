@@ -1144,7 +1144,7 @@ public class ObjectBundleServiceTest
         ObjectBundle bundle = objectBundleService.create( params );
         ObjectBundleValidationReport validate = objectBundleValidationService.validate( bundle );
         assertFalse( validate.getErrorReports().isEmpty() );
-        assertEquals( "leftSide.description", validate.getErrorReports().get( 0 ).getErrorProperty() );
+        assertEquals( "description", validate.getErrorReports().get( 0 ).getErrorProperty() );
         assertEquals( ErrorCode.E4001, validate.getErrorReports().get( 0 ).getErrorCode() );
     }
 

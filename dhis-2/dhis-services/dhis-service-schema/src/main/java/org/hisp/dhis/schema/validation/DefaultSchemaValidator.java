@@ -39,6 +39,7 @@ import org.hisp.dhis.schema.SchemaService;
 import org.hisp.dhis.system.util.ReflectionUtils;
 import org.hisp.dhis.system.util.ValidationUtils;
 import org.hisp.dhis.user.User;
+import org.hisp.dhis.validation.ValidationRule;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
@@ -133,6 +134,20 @@ public class DefaultSchemaValidator implements SchemaValidator
             if ( user.getUserCredentials() != null )
             {
                 errorReports.addAll( validate( user.getUserCredentials(), persisted ) );
+            }
+        }
+
+        if ( ValidationRule.class.isInstance( object ) )
+        {
+            ValidationRule rule = (ValidationRule) object;
+
+            if ( rule.getLeftSide() != null )
+            {
+                errorReports.addAll( validate( rule.getLeftSide(), persisted ) );
+            }
+            if ( rule.getRightSide() != null )
+            {
+                errorReports.addAll( validate( rule.getRightSide(), persisted ) );
             }
         }
 
