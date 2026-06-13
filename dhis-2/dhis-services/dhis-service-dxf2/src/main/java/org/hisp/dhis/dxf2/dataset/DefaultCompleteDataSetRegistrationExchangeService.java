@@ -12,7 +12,7 @@
  * this list of conditions and the following disclaimer in the documentation
  * and/or other materials provided with the distribution.
  *
- * 3. Neither the name of the copyright holder nor the names of its contributors
+ * 3. Neither the name of the copyright holder nor the names of its contributors 
  * may be used to endorse or promote products derived from this software without
  * specific prior written permission.
  *
@@ -35,6 +35,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.sql.Timestamp;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Date;
 import java.util.HashSet;
 import java.util.List;
@@ -548,14 +549,13 @@ public class DefaultCompleteDataSetRegistrationExchangeService
       CompleteDataSetRegistration internalCdsr =
           createCompleteDataSetRegistration(cdsr, mdProps, now, storedBy);
 
-      CompleteDataSetRegistration existingCdsr =
-          config.isSkipExistingCheck() ? null : writer.findObject(internalCdsr);
+      boolean exists = !config.isSkipExistingCheck() && writer.exists(internalCdsr);
 
       ImportStrategy strategy = config.getStrategy();
 
       boolean isDryRun = config.isDryRun();
 
-      if (!config.isSkipExistingCheck() && existingCdsr != null) {
+      if (exists) {
         // CDSR already exists
 
         if (strategy.isCreateAndUpdate() || strategy.isUpdate() || strategy.isSync()) {
@@ -577,35 +577,21 @@ public class DefaultCompleteDataSetRegistrationExchangeService
             writer.deleteObject(internalCdsr);
           }
         }
-      } else {
-        // CDSR does not already exist
+      } else if (strategy.isCreateAndUpdate() || strategy.isCreate() || strategy.isSync()) {
+        // CDSR does not already exist -> add new CDSR
 
-        if (strategy.isCreateAndUpdate() || strategy.isCreate() || strategy.isSync()) {
-          if (existingCdsr != null) {
-            // Already exists -> update
+        boolean added = false;
 
-            importCount++;
+        if (!isDryRun) {
+          added = writer.addObject(internalCdsr);
 
-            if (!isDryRun) {
-              writer.updateObject(internalCdsr);
-            }
-          } else {
-            // Does not exist -> add new CDSR
-
-            boolean added = false;
-
-            if (!isDryRun) {
-              added = writer.addObject(internalCdsr);
-
-              if (added) {
-                sendNotifications(config, internalCdsr);
-              }
-            }
-
-            if (isDryRun || added) {
-              importCount++;
-            }
+          if (added) {
+            sendNotifications(config, internalCdsr);
           }
+        }
+
+        if (isDryRun || added) {
+          importCount++;
         }
       }
     }
@@ -815,9 +801,8 @@ public class DefaultCompleteDataSetRegistrationExchangeService
   // -----------------------------------------------------------------
 
   /**
-   * Replaces the quick {@code BatchHandler<CompleteDataSetRegistration>} with Spring
-   * {@link JdbcTemplate}-based SQL that participates in the caller's {@code @Transactional}
-   * context.
+   * Replaces the quick {@code BatchHandler<CompleteDataSetRegistration>} with Spring {@link
+   * JdbcTemplate}-based SQL that participates in the caller's {@code @Transactional} context.
    *
    * <p>Why this matters: the old {@code BatchHandler} opened its own raw JDBC connection with
    * {@code autoCommit=true}, so it could not see periods created inside the surrounding Spring
@@ -844,11 +829,12 @@ public class DefaultCompleteDataSetRegistrationExchangeService
      */
     private static final int BATCH_SIZE = 1000;
 
-    // Unique key: (datasetid, periodid, sourceid, attributeoptioncomboid)
+    /** The composite unique key (datasetid, periodid, sourceid, attributeoptioncomboid). */
+    private static final String KEY_PREDICATE =
+        "datasetid = ? AND periodid = ? AND sourceid = ? AND attributeoptioncomboid = ?";
 
-    private static final String SQL_FIND =
-        "SELECT storedby FROM completedatasetregistration"
-            + " WHERE datasetid = ? AND periodid = ? AND sourceid = ? AND attributeoptioncomboid = ?";
+    private static final String SQL_EXISTS =
+        "SELECT 1 FROM completedatasetregistration WHERE " + KEY_PREDICATE;
 
     private static final String SQL_INSERT =
         "INSERT INTO completedatasetregistration"
@@ -859,11 +845,11 @@ public class DefaultCompleteDataSetRegistrationExchangeService
     private static final String SQL_UPDATE =
         "UPDATE completedatasetregistration"
             + " SET date = ?, storedby = ?, lastupdatedby = ?, lastupdated = ?, completed = ?"
-            + " WHERE datasetid = ? AND periodid = ? AND sourceid = ? AND attributeoptioncomboid = ?";
+            + " WHERE "
+            + KEY_PREDICATE;
 
     private static final String SQL_DELETE =
-        "DELETE FROM completedatasetregistration"
-            + " WHERE datasetid = ? AND periodid = ? AND sourceid = ? AND attributeoptioncomboid = ?";
+        "DELETE FROM completedatasetregistration WHERE " + KEY_PREDICATE;
 
     private final JdbcTemplate jdbc;
     private final List<CompleteDataSetRegistration> insertBuffer = new ArrayList<>();
@@ -874,25 +860,9 @@ public class DefaultCompleteDataSetRegistrationExchangeService
       this.jdbc = jdbc;
     }
 
-    /**
-     * Returns the existing CDSR from the database (by unique key), or {@code null} if not found.
-     * Only the {@code storedBy} field is populated on the returned object, matching the behaviour
-     * of the original BatchHandler.
-     */
-    CompleteDataSetRegistration findObject(CompleteDataSetRegistration cdsr) {
-      List<CompleteDataSetRegistration> results =
-          jdbc.query(
-              SQL_FIND,
-              (rs, rowNum) -> {
-                CompleteDataSetRegistration r = new CompleteDataSetRegistration();
-                r.setStoredBy(rs.getString("storedby"));
-                return r;
-              },
-              cdsr.getDataSet().getId(),
-              cdsr.getPeriod().getId(),
-              cdsr.getSource().getId(),
-              cdsr.getAttributeOptionCombo().getId());
-      return results.isEmpty() ? null : results.get(0);
+    /** Whether a CDSR with this unique key already exists in the database. */
+    boolean exists(CompleteDataSetRegistration cdsr) {
+      return !jdbc.queryForList(SQL_EXISTS, keyValues(cdsr)).isEmpty();
     }
 
     /**
@@ -934,15 +904,12 @@ public class DefaultCompleteDataSetRegistrationExchangeService
     }
 
     void deleteObject(CompleteDataSetRegistration cdsr) {
-      jdbc.update(
-          SQL_DELETE,
-          cdsr.getDataSet().getId(),
-          cdsr.getPeriod().getId(),
-          cdsr.getSource().getId(),
-          cdsr.getAttributeOptionCombo().getId());
+      jdbc.update(SQL_DELETE, keyValues(cdsr));
     }
 
-    /** Executes the currently buffered inserts as one JDBC batch and resets the buffer + seen-keys. */
+    /**
+     * Executes the currently buffered inserts as one JDBC batch and resets the buffer + seen-keys.
+     */
     void flush() {
       if (insertBuffer.isEmpty()) {
         return;
@@ -971,14 +938,18 @@ public class DefaultCompleteDataSetRegistrationExchangeService
       flush();
     }
 
+    /** The four key column values, in {@link #KEY_PREDICATE} order, for use as query parameters. */
+    private static Object[] keyValues(CompleteDataSetRegistration r) {
+      return new Object[] {
+        r.getDataSet().getId(),
+        r.getPeriod().getId(),
+        r.getSource().getId(),
+        r.getAttributeOptionCombo().getId()
+      };
+    }
+
     private static String uniqueKey(CompleteDataSetRegistration r) {
-      return r.getDataSet().getId()
-          + ":"
-          + r.getPeriod().getId()
-          + ":"
-          + r.getSource().getId()
-          + ":"
-          + r.getAttributeOptionCombo().getId();
+      return Arrays.toString(keyValues(r));
     }
 
     private static Timestamp toTimestamp(Date date) {

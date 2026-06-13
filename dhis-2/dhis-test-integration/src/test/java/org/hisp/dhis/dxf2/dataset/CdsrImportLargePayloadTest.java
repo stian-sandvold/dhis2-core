@@ -12,7 +12,7 @@
  * this list of conditions and the following disclaimer in the documentation
  * and/or other materials provided with the distribution.
  *
- * 3. Neither the name of the copyright holder nor the names of its contributors
+ * 3. Neither the name of the copyright holder nor the names of its contributors 
  * may be used to endorse or promote products derived from this software without
  * specific prior written permission.
  *
@@ -134,7 +134,8 @@ class CdsrImportLargePayloadTest extends PostgresIntegrationTestBase {
         "summary should report every registration imported across all flush batches");
 
     // The decisive check: every row is durably persisted, none lost/duplicated at a batch boundary.
-    List<CompleteDataSetRegistration> all = registrationService.getAllCompleteDataSetRegistrations();
+    List<CompleteDataSetRegistration> all =
+        registrationService.getAllCompleteDataSetRegistrations();
     assertEquals(
         PAYLOAD_SIZE,
         all.size(),

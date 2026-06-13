@@ -12,7 +12,7 @@
  * this list of conditions and the following disclaimer in the documentation
  * and/or other materials provided with the distribution.
  *
- * 3. Neither the name of the copyright holder nor the names of its contributors
+ * 3. Neither the name of the copyright holder nor the names of its contributors 
  * may be used to endorse or promote products derived from this software without
  * specific prior written permission.
  *
@@ -44,7 +44,6 @@ import org.hisp.dhis.dxf2.common.ImportOptions;
 import org.hisp.dhis.dxf2.importsummary.ImportStatus;
 import org.hisp.dhis.dxf2.importsummary.ImportSummary;
 import org.hisp.dhis.organisationunit.OrganisationUnit;
-import org.hisp.dhis.period.Period;
 import org.hisp.dhis.period.PeriodService;
 import org.hisp.dhis.period.PeriodType;
 import org.hisp.dhis.period.PeriodTypeEnum;
@@ -85,9 +84,9 @@ import org.springframework.beans.factory.annotation.Autowired;
 class CdsrImportPerfTest extends PostgresIntegrationTestBase {
 
   /**
-   * Registrations per import. Defaults to 480 (40 years of monthly periods); override with
-   * {@code -Dcdsr.perf.size=N} to measure other sizes, e.g. 2000 to exercise the writer's
-   * multi-batch flush path (BATCH_SIZE=1000) in the real pipeline.
+   * Registrations per import. Defaults to 480 (40 years of monthly periods); override with {@code
+   * -Dcdsr.perf.size=N} to measure other sizes, e.g. 2000 to exercise the writer's multi-batch
+   * flush path (BATCH_SIZE=1000) in the real pipeline.
    */
   private static final int PAYLOAD_SIZE = Integer.getInteger("cdsr.perf.size", 480);
 
