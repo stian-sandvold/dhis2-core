@@ -84,8 +84,12 @@ import org.springframework.beans.factory.annotation.Autowired;
  */
 class CdsrImportPerfTest extends PostgresIntegrationTestBase {
 
-  /** Registrations per import. 480 distinct monthly periods = 40 years, well within range. */
-  private static final int PAYLOAD_SIZE = 480;
+  /**
+   * Registrations per import. Defaults to 480 (40 years of monthly periods); override with
+   * {@code -Dcdsr.perf.size=N} to measure other sizes, e.g. 2000 to exercise the writer's
+   * multi-batch flush path (BATCH_SIZE=1000) in the real pipeline.
+   */
+  private static final int PAYLOAD_SIZE = Integer.getInteger("cdsr.perf.size", 480);
 
   private static final int WARMUP_ROUNDS = 2;
   private static final int TIMED_ROUNDS = 5;
