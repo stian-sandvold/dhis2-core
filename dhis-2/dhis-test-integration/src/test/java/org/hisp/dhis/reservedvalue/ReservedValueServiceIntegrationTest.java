@@ -35,6 +35,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Date;
 import java.util.HashMap;
@@ -53,6 +54,7 @@ import org.hisp.dhis.trackedentity.TrackedEntityAttribute;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.dao.DataAccessException;
 
 class ReservedValueServiceIntegrationTest extends PostgresIntegrationTestBase {
 
@@ -248,6 +250,61 @@ class ReservedValueServiceIntegrationTest extends PostgresIntegrationTestBase {
     assertFalse(
         reservedValueService.useReservedValue(simpleTextPattern.getTextPattern(), "FOOBAR"));
     assertEquals(0, reservedValueStore.getCount());
+  }
+
+  /**
+   * Directly exercises the store's bulk-insert path with more rows than {@code INSERT_BATCH_SIZE}
+   * (1000), forcing at least two JDBC batch flushes, and asserts every row is persisted exactly
+   * once. This locks in the streaming-flush correctness of the JdbcTemplate writer that replaced
+   * the quick {@code BatchHandler}. (Passes on both implementations — the regression net for the
+   * swap.)
+   */
+  @Test
+  void bulkInsertReservedValuesPersistsAllRowsAcrossBatchBoundary() {
+    int n = 1500;
+    List<ReservedValue> values = new ArrayList<>(n);
+    for (int i = 0; i < n; i++) {
+      values.add(
+          ReservedValue.builder()
+              .ownerObject(Objects.TRACKEDENTITYATTRIBUTE.name())
+              .ownerUid("BULK")
+              .key("SEQ(#####)")
+              .value(String.format("%05d", i))
+              .created(new Date())
+              .expiryDate(future)
+              .build());
+    }
+
+    reservedValueStore.bulkInsertReservedValues(values);
+
+    List<ReservedValue> all = reservedValueStore.getAll();
+    assertEquals(n, all.size());
+    assertEquals(
+        n, all.stream().map(ReservedValue::getValue).distinct().count(), "values must be unique");
+  }
+
+  /**
+   * The JdbcTemplate writer runs on the caller's transactional connection, so a failed insert
+   * propagates as a {@link DataAccessException} (and rolls back with the caller) instead of being
+   * logged and swallowed as the old BatchHandler did on its separate autoCommit connection. Two
+   * rows with an identical unique tuple (ownerobject, owneruid, key, value) trip the unique
+   * constraint.
+   */
+  @Test
+  void bulkInsertReservedValuesPropagatesFailureInsteadOfSwallowing() {
+    ReservedValue duplicate =
+        ReservedValue.builder()
+            .ownerObject(Objects.TRACKEDENTITYATTRIBUTE.name())
+            .ownerUid("DUP")
+            .key("DUP")
+            .value("DUP")
+            .created(new Date())
+            .expiryDate(future)
+            .build();
+
+    assertThrows(
+        DataAccessException.class,
+        () -> reservedValueStore.bulkInsertReservedValues(List.of(duplicate, duplicate)));
   }
 
   private static TrackedEntityAttribute createTextPattern(
