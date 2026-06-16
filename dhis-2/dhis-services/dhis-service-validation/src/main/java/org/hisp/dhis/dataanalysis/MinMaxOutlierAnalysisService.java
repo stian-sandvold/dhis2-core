@@ -29,6 +29,9 @@
  */
 package org.hisp.dhis.dataanalysis;
 
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Date;
 import java.util.EnumSet;
@@ -42,16 +45,16 @@ import org.hisp.dhis.category.CategoryOptionCombo;
 import org.hisp.dhis.common.ValueType;
 import org.hisp.dhis.dataelement.DataElement;
 import org.hisp.dhis.datavalue.DeflatedDataValue;
-import org.hisp.dhis.jdbc.batchhandler.MinMaxDataElementBatchHandler;
 import org.hisp.dhis.minmax.MinMaxDataElement;
 import org.hisp.dhis.minmax.MinMaxDataElementService;
 import org.hisp.dhis.organisationunit.OrganisationUnit;
 import org.hisp.dhis.period.Period;
 import org.hisp.dhis.system.util.MathUtils;
-import org.hisp.quick.BatchHandler;
-import org.hisp.quick.BatchHandlerFactory;
 import org.joda.time.DateTime;
+import org.springframework.jdbc.core.BatchPreparedStatementSetter;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 /**
  * @author Lars Helge Overland
@@ -67,7 +70,21 @@ public class MinMaxOutlierAnalysisService implements MinMaxDataAnalysisService {
 
   private final MinMaxDataElementService minMaxDataElementService;
 
-  private final BatchHandlerFactory batchHandlerFactory;
+  private final JdbcTemplate jdbcTemplate;
+
+  /** Max rows per JDBC batch flush; keeps memory bounded for large generations. */
+  private static final int INSERT_BATCH_SIZE = 1000;
+
+  /**
+   * Column order matches the legacy {@code MinMaxDataElementBatchHandler}. {@code
+   * minmaxdataelementid} is omitted: it has a DB default ({@code nextval('hibernate_sequence')},
+   * see migration V2_43_5), so the database assigns it — same as the modern {@code
+   * HibernateMinMaxDataElementStore.upsertValues}.
+   */
+  private static final String INSERT_SQL =
+      "insert into minmaxdataelement "
+          + "(sourceid, dataelementid, categoryoptioncomboid, minimumvalue, maximumvalue, generatedvalue) "
+          + "values (?, ?, ?, ?, ?, ?)";
 
   // -------------------------------------------------------------------------
   // DataAnalysisService implementation
@@ -97,6 +114,7 @@ public class MinMaxOutlierAnalysisService implements MinMaxDataAnalysisService {
   }
 
   @Override
+  @Transactional
   public void generateMinMaxValues(
       OrganisationUnit orgUnit, Collection<DataElement> dataElements, Double stdDevFactor) {
     log.info(
@@ -110,8 +128,7 @@ public class MinMaxOutlierAnalysisService implements MinMaxDataAnalysisService {
 
     log.debug("Deleted existing min-max values");
 
-    BatchHandler<MinMaxDataElement> batchHandler =
-        batchHandlerFactory.createBatchHandler(MinMaxDataElementBatchHandler.class).init();
+    List<MinMaxDataElement> toInsert = new ArrayList<>();
 
     for (DataElement dataElement : dataElements) {
       if (dataElement.getValueType().isNumeric()) {
@@ -145,13 +162,46 @@ public class MinMaxOutlierAnalysisService implements MinMaxDataAnalysisService {
           CategoryOptionCombo coc = new CategoryOptionCombo();
           coc.setId(measures.getCategoryOptionComboId());
 
-          batchHandler.addObject(new MinMaxDataElement(dataElement, ou, coc, min, max, true));
+          toInsert.add(new MinMaxDataElement(dataElement, ou, coc, min, max, true));
         }
       }
     }
 
-    log.info("Min-max value generation done");
+    insertMinMaxValues(toInsert);
 
-    batchHandler.flush();
+    log.info("Min-max value generation done");
+  }
+
+  /**
+   * Bulk-inserts the generated min-max values via the Spring transaction-bound connection (chunked
+   * {@code batchUpdate}), replacing the legacy {@code org.hisp.quick.BatchHandler}. The delete
+   * (above) and this insert now run in one {@code @Transactional} method, so a failure rolls both
+   * back — previously the delete committed separately and a failed insert left the data elements
+   * with no min-max values at all.
+   */
+  private void insertMinMaxValues(List<MinMaxDataElement> values) {
+    for (int from = 0; from < values.size(); from += INSERT_BATCH_SIZE) {
+      List<MinMaxDataElement> batch =
+          values.subList(from, Math.min(from + INSERT_BATCH_SIZE, values.size()));
+      jdbcTemplate.batchUpdate(
+          INSERT_SQL,
+          new BatchPreparedStatementSetter() {
+            @Override
+            public void setValues(PreparedStatement ps, int i) throws SQLException {
+              MinMaxDataElement e = batch.get(i);
+              ps.setLong(1, e.getSource().getId());
+              ps.setLong(2, e.getDataElement().getId());
+              ps.setLong(3, e.getOptionCombo().getId());
+              ps.setInt(4, e.getMin());
+              ps.setInt(5, e.getMax());
+              ps.setBoolean(6, e.isGenerated());
+            }
+
+            @Override
+            public int getBatchSize() {
+              return batch.size();
+            }
+          });
+    }
   }
 }

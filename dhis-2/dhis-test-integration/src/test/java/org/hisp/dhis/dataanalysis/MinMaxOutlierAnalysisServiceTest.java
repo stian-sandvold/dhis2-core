@@ -30,6 +30,9 @@
 package org.hisp.dhis.dataanalysis;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 import java.util.Date;
@@ -191,6 +194,46 @@ class MinMaxOutlierAnalysisServiceTest extends PostgresIntegrationTestBase {
 
     assertEquals(3, resultA.size());
     assertEquals(2, resultB.size());
+  }
+
+  /**
+   * Exercises {@link MinMaxOutlierAnalysisService#generateMinMaxValues} end-to-end and asserts the
+   * generated min-max bounds are actually persisted via the JdbcTemplate writer that replaced the
+   * quick {@code BatchHandler}. dataElementA has 10 data values at the org unit → one generated
+   * min-max row; dataElementB has none → no row. Closes the coverage gap: previously no test
+   * exercised the bulk-insert path.
+   */
+  @Test
+  void generateMinMaxValuesPersistsGeneratedRows() {
+    addDataValues(
+        createDataValue(dataElementA, periodA, organisationUnitA, "5", categoryOptionCombo),
+        createDataValue(dataElementA, periodB, organisationUnitA, "-50", categoryOptionCombo),
+        createDataValue(dataElementA, periodC, organisationUnitA, "5", categoryOptionCombo),
+        createDataValue(dataElementA, periodD, organisationUnitA, "-5", categoryOptionCombo),
+        createDataValue(dataElementA, periodE, organisationUnitA, "10", categoryOptionCombo),
+        createDataValue(dataElementA, periodF, organisationUnitA, "-10", categoryOptionCombo),
+        createDataValue(dataElementA, periodG, organisationUnitA, "13", categoryOptionCombo),
+        createDataValue(dataElementA, periodH, organisationUnitA, "-13", categoryOptionCombo),
+        createDataValue(dataElementA, periodI, organisationUnitA, "41", categoryOptionCombo),
+        createDataValue(dataElementA, periodJ, organisationUnitA, "-41", categoryOptionCombo));
+
+    assertTrue(
+        minMaxDataElementService.getMinMaxDataElements(organisationUnitA, dataElementsA).isEmpty(),
+        "no min-max values before generation");
+
+    minMaxOutlierAnalysisService.generateMinMaxValues(organisationUnitA, dataElementsA, 2.0);
+
+    MinMaxDataElement generated =
+        minMaxDataElementService.getMinMaxDataElement(
+            organisationUnitA, dataElementA, categoryOptionCombo);
+    assertNotNull(generated, "a min-max row should be generated and persisted for dataElementA");
+    assertTrue(generated.isGenerated(), "generated flag should be true");
+    assertTrue(generated.getMin() <= generated.getMax(), "min must not exceed max");
+
+    assertNull(
+        minMaxDataElementService.getMinMaxDataElement(
+            organisationUnitA, dataElementB, categoryOptionCombo),
+        "dataElementB has no data values, so nothing should be generated for it");
   }
 
   private void addDataValues(DataValue... values) {
