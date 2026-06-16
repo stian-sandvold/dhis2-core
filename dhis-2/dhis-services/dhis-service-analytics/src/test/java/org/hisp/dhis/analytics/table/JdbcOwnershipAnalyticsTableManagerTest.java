@@ -51,16 +51,13 @@ import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.mockingDetails;
 import static org.mockito.Mockito.when;
 
-import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.GregorianCalendar;
 import java.util.List;
 import java.util.Map;
-import javax.sql.DataSource;
 import org.hisp.dhis.analytics.AnalyticsTableHookService;
 import org.hisp.dhis.analytics.AnalyticsTableType;
 import org.hisp.dhis.analytics.AnalyticsTableUpdateParams;
@@ -84,8 +81,6 @@ import org.hisp.dhis.setting.SystemSettings;
 import org.hisp.dhis.setting.SystemSettingsProvider;
 import org.hisp.dhis.system.database.DatabaseInfoProvider;
 import org.hisp.dhis.test.TestBase;
-import org.hisp.quick.JdbcConfiguration;
-import org.hisp.quick.StatementDialect;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -124,14 +119,6 @@ class JdbcOwnershipAnalyticsTableManagerTest extends TestBase {
   @Mock private DatabaseInfoProvider databaseInfoProvider;
 
   @Mock private JdbcTemplate jdbcTemplate;
-
-  @Mock private JdbcConfiguration jdbcConfiguration;
-
-  @Mock private DataSource dataSource;
-
-  @Mock private Connection connection;
-
-  @Mock private Statement statement;
 
   @Mock private JdbcOwnershipWriter writer;
 
@@ -214,11 +201,6 @@ class JdbcOwnershipAnalyticsTableManagerTest extends TestBase {
     Date end2 = new GregorianCalendar(2022, FEBRUARY, 28).getTime();
     Date start3 = new GregorianCalendar(2022, MARCH, 1).getTime();
     Date end3 = new GregorianCalendar(2022, MARCH, 31).getTime();
-
-    when(jdbcConfiguration.getDialect()).thenReturn(StatementDialect.POSTGRESQL);
-    when(jdbcConfiguration.getDataSource()).thenReturn(dataSource);
-    when(dataSource.getConnection()).thenReturn(connection);
-    when(connection.createStatement()).thenReturn(statement);
 
     // Mock the jdbcTemplate callback handler to return the mocked ResultSet
     // object:

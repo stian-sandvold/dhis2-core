@@ -29,6 +29,7 @@
  */
 package org.hisp.dhis.analytics.table;
 
+import static java.util.Calendar.DECEMBER;
 import static java.util.Calendar.FEBRUARY;
 import static java.util.Calendar.JANUARY;
 import static org.apache.commons.lang3.reflect.FieldUtils.writeField;
@@ -39,46 +40,33 @@ import static org.hisp.dhis.analytics.table.writer.JdbcOwnershipWriter.TRACKEDEN
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.mockingDetails;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
 
-import java.sql.Connection;
-import java.sql.SQLException;
-import java.sql.Statement;
-import java.util.ArrayList;
 import java.util.Date;
 import java.util.GregorianCalendar;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import javax.sql.DataSource;
+import org.hisp.dhis.analytics.table.writer.JdbcOwnershipBatchWriter;
 import org.hisp.dhis.analytics.table.writer.JdbcOwnershipWriter;
-import org.hisp.dhis.jdbc.batchhandler.MappingBatchHandler;
-import org.hisp.quick.JdbcConfiguration;
-import org.hisp.quick.StatementDialect;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
-import org.mockito.invocation.Invocation;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 /**
- * {@see JdbcOwnershipWriter} Tester.
+ * {@see JdbcOwnershipWriter} Tester. Verifies the ownership-period combining logic by asserting the
+ * row maps handed to the (mocked) {@link JdbcOwnershipBatchWriter} — decoupled from the SQL the
+ * writer's sink produces (previously this test asserted the quick BatchHandler's literal SQL).
  *
  * @author Jim Grace
  */
 @ExtendWith(MockitoExtension.class)
 class JdbcOwnershipWriterTest {
-  @Mock private DataSource dataSource;
-
-  @Mock private Connection connection;
-
-  @Mock private Statement statement;
-
-  private MappingBatchHandler batchHandler;
+  @Mock private JdbcOwnershipBatchWriter batchWriter;
 
   private JdbcOwnershipWriter writer;
 
@@ -90,107 +78,84 @@ class JdbcOwnershipWriterTest {
 
   private static final String ouB = "ouBbbbbbbbb";
 
-  private static final Date date_2022_01 = new GregorianCalendar(2022, JANUARY, 1).getTime();
+  private static final Date date_2022_01_01 = new GregorianCalendar(2022, JANUARY, 1).getTime();
 
-  private static final Date date_2022_02 = new GregorianCalendar(2022, FEBRUARY, 1).getTime();
+  private static final Date date_2022_01_02 = new GregorianCalendar(2022, JANUARY, 2).getTime();
 
-  private static final List<String> columns = List.of(TRACKEDENTITY, OU, STARTDATE, ENDDATE);
+  private static final Date date_2022_02_01 = new GregorianCalendar(2022, FEBRUARY, 1).getTime();
+
+  private static final Date date_2022_02_02 = new GregorianCalendar(2022, FEBRUARY, 2).getTime();
+
+  private static final Date FAR_PAST = new GregorianCalendar(1000, JANUARY, 1).getTime();
+
+  private static final Date FAR_FUTURE = new GregorianCalendar(9999, DECEMBER, 31).getTime();
 
   @BeforeEach
-  public void setUp() throws SQLException {
-    JdbcConfiguration config = new JdbcConfiguration(StatementDialect.POSTGRESQL, dataSource);
-
-    when(dataSource.getConnection()).thenReturn(connection);
-    when(connection.createStatement()).thenReturn(statement);
-
-    batchHandler =
-        MappingBatchHandler.builder()
-            .jdbcConfiguration(config)
-            .tableName("analytics_ownership_programUidA")
-            .columns(columns)
-            .build();
-
-    batchHandler.init();
-
-    writer = JdbcOwnershipWriter.getInstance(batchHandler);
+  public void setUp() {
+    writer = JdbcOwnershipWriter.getInstance(batchWriter);
   }
 
   @Test
-  void testWriteNoOwnershipChanges() throws SQLException {
-    writer.write(mapOf(TRACKEDENTITY, teA, OU, ouA, ENDDATE, date_2022_01));
-    writer.write(mapOf(TRACKEDENTITY, teA, OU, ouA, ENDDATE, date_2022_02));
+  void testWriteNoOwnershipChanges() {
+    writer.write(mapOf(TRACKEDENTITY, teA, OU, ouA, ENDDATE, date_2022_01_01));
+    writer.write(mapOf(TRACKEDENTITY, teA, OU, ouA, ENDDATE, date_2022_02_01));
     writer.write(mapOf(TRACKEDENTITY, teA, OU, ouA, ENDDATE, null));
-    writer.write(mapOf(TRACKEDENTITY, teB, OU, ouB, ENDDATE, date_2022_01));
-    writer.write(mapOf(TRACKEDENTITY, teB, OU, ouB, ENDDATE, date_2022_02));
+    writer.write(mapOf(TRACKEDENTITY, teB, OU, ouB, ENDDATE, date_2022_01_01));
+    writer.write(mapOf(TRACKEDENTITY, teB, OU, ouB, ENDDATE, date_2022_02_01));
     writer.write(mapOf(TRACKEDENTITY, teB, OU, ouB, ENDDATE, null));
 
-    batchHandler.flush();
-
-    verify(statement, never()).executeUpdate(any());
+    // Ownership never changed for either tracked entity -> nothing written.
+    verify(batchWriter, never()).addObject(any());
   }
 
-  /** Note that {@link BatchHandler} does not quote column names. */
   @Test
   void testWriteOneOwnershipChange() {
-    writer.write(mapOf(TRACKEDENTITY, teA, OU, ouA, ENDDATE, date_2022_01));
-    writer.write(mapOf(TRACKEDENTITY, teA, OU, ouA, ENDDATE, date_2022_02));
+    writer.write(mapOf(TRACKEDENTITY, teA, OU, ouA, ENDDATE, date_2022_01_01));
+    writer.write(mapOf(TRACKEDENTITY, teA, OU, ouA, ENDDATE, date_2022_02_01));
     writer.write(mapOf(TRACKEDENTITY, teA, OU, ouB, ENDDATE, null));
-    writer.write(mapOf(TRACKEDENTITY, teB, OU, ouA, ENDDATE, date_2022_01));
-    writer.write(mapOf(TRACKEDENTITY, teB, OU, ouA, ENDDATE, date_2022_02));
+    writer.write(mapOf(TRACKEDENTITY, teB, OU, ouA, ENDDATE, date_2022_01_01));
+    writer.write(mapOf(TRACKEDENTITY, teB, OU, ouA, ENDDATE, date_2022_02_01));
     writer.write(mapOf(TRACKEDENTITY, teB, OU, ouA, ENDDATE, null));
 
-    batchHandler.flush();
-
-    assertEquals(
-        "insert into analytics_ownership_programUidA (teuid,ou,startdate,enddate) values "
-            + "('teAaaaaaaa','ouAaaaaaaaa','1000-01-01','2022-02-01'),"
-            + "('teAaaaaaaa','ouBbbbbbbbb','2022-02-02','9999-12-31')",
-        getUpdateSql());
+    assertRowsWritten(
+        row(teA, ouA, FAR_PAST, date_2022_02_01), row(teA, ouB, date_2022_02_02, FAR_FUTURE));
   }
 
   @Test
   void testWriteTwoOwnershipChanges() {
-    writer.write(mapOf(TRACKEDENTITY, teA, OU, ouA, ENDDATE, date_2022_01));
-    writer.write(mapOf(TRACKEDENTITY, teA, OU, ouB, ENDDATE, date_2022_02));
+    writer.write(mapOf(TRACKEDENTITY, teA, OU, ouA, ENDDATE, date_2022_01_01));
+    writer.write(mapOf(TRACKEDENTITY, teA, OU, ouB, ENDDATE, date_2022_02_01));
     writer.write(mapOf(TRACKEDENTITY, teA, OU, ouA, ENDDATE, null));
-    writer.write(mapOf(TRACKEDENTITY, teB, OU, ouA, ENDDATE, date_2022_01));
-    writer.write(mapOf(TRACKEDENTITY, teB, OU, ouA, ENDDATE, date_2022_02));
+    writer.write(mapOf(TRACKEDENTITY, teB, OU, ouA, ENDDATE, date_2022_01_01));
+    writer.write(mapOf(TRACKEDENTITY, teB, OU, ouA, ENDDATE, date_2022_02_01));
     writer.write(mapOf(TRACKEDENTITY, teB, OU, ouA, ENDDATE, null));
 
-    batchHandler.flush();
-
-    assertEquals(
-        "insert into analytics_ownership_programUidA (teuid,ou,startdate,enddate) values "
-            + "('teAaaaaaaa','ouAaaaaaaaa','1000-01-01','2022-01-01'),"
-            + "('teAaaaaaaa','ouBbbbbbbbb','2022-01-02','2022-02-01'),"
-            + "('teAaaaaaaa','ouAaaaaaaaa','2022-02-02','9999-12-31')",
-        getUpdateSql());
+    assertRowsWritten(
+        row(teA, ouA, FAR_PAST, date_2022_01_01),
+        row(teA, ouB, date_2022_01_02, date_2022_02_01),
+        row(teA, ouA, date_2022_02_02, FAR_FUTURE));
   }
 
   @Test
   void testWriteThreeOwnershipChanges() {
-    writer.write(mapOf(TRACKEDENTITY, teA, OU, ouA, ENDDATE, date_2022_01));
-    writer.write(mapOf(TRACKEDENTITY, teA, OU, ouB, ENDDATE, date_2022_02));
+    writer.write(mapOf(TRACKEDENTITY, teA, OU, ouA, ENDDATE, date_2022_01_01));
+    writer.write(mapOf(TRACKEDENTITY, teA, OU, ouB, ENDDATE, date_2022_02_01));
     writer.write(mapOf(TRACKEDENTITY, teA, OU, ouA, ENDDATE, null));
-    writer.write(mapOf(TRACKEDENTITY, teB, OU, ouA, ENDDATE, date_2022_01));
-    writer.write(mapOf(TRACKEDENTITY, teB, OU, ouA, ENDDATE, date_2022_02));
+    writer.write(mapOf(TRACKEDENTITY, teB, OU, ouA, ENDDATE, date_2022_01_01));
+    writer.write(mapOf(TRACKEDENTITY, teB, OU, ouA, ENDDATE, date_2022_02_01));
     writer.write(mapOf(TRACKEDENTITY, teB, OU, ouB, ENDDATE, null));
 
-    batchHandler.flush();
-
-    assertEquals(
-        "insert into analytics_ownership_programUidA (teuid,ou,startdate,enddate) values "
-            + "('teAaaaaaaa','ouAaaaaaaaa','1000-01-01','2022-01-01'),"
-            + "('teAaaaaaaa','ouBbbbbbbbb','2022-01-02','2022-02-01'),"
-            + "('teAaaaaaaa','ouAaaaaaaaa','2022-02-02','9999-12-31'),"
-            + "('teBbbbbbbb','ouAaaaaaaaa','1000-01-01','2022-02-01'),"
-            + "('teBbbbbbbb','ouBbbbbbbbb','2022-02-02','9999-12-31')",
-        getUpdateSql());
+    assertRowsWritten(
+        row(teA, ouA, FAR_PAST, date_2022_01_01),
+        row(teA, ouB, date_2022_01_02, date_2022_02_01),
+        row(teA, ouA, date_2022_02_02, FAR_FUTURE),
+        row(teB, ouA, FAR_PAST, date_2022_02_01),
+        row(teB, ouB, date_2022_02_02, FAR_FUTURE));
   }
 
   @Test
   void testWriteWhenEndDateIsNull() throws IllegalAccessException {
-    JdbcOwnershipWriter writer = JdbcOwnershipWriter.getInstance(batchHandler);
+    JdbcOwnershipWriter writer = JdbcOwnershipWriter.getInstance(batchWriter);
     Map<String, Object> prevRow = new HashMap<>();
     writeField(writer, "prevRow", prevRow, true);
 
@@ -203,6 +168,18 @@ class JdbcOwnershipWriterTest {
   // Supportive methods
   // -------------------------------------------------------------------------
 
+  /** Captures every row handed to the batch writer and asserts they equal the expected rows. */
+  @SafeVarargs
+  private void assertRowsWritten(Map<String, Object>... expected) {
+    ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
+    verify(batchWriter, org.mockito.Mockito.times(expected.length)).addObject(captor.capture());
+    assertEquals(List.of(expected), captor.getAllValues());
+  }
+
+  private Map<String, Object> row(String teuid, String ou, Date startDate, Date endDate) {
+    return Map.of(TRACKEDENTITY, teuid, OU, ou, STARTDATE, startDate, ENDDATE, endDate);
+  }
+
   /**
    * Creates a map of three key/value pairs that allows nulls (because the database can return nulls
    * and the logic relies on that).
@@ -213,15 +190,5 @@ class JdbcOwnershipWriterTest {
     map.put(key2, value2);
     map.put(key3, value3);
     return map;
-  }
-
-  /** Returns the invoked SQL statement. */
-  private String getUpdateSql() {
-    List<Invocation> invocations = new ArrayList<>(mockingDetails(statement).getInvocations());
-    assertEquals(2, invocations.size());
-    assertEquals("executeUpdate", invocations.get(0).getMethod().getName());
-    assertEquals("close", invocations.get(1).getMethod().getName());
-
-    return invocations.get(0).getArgument(0);
   }
 }

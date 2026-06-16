@@ -55,6 +55,7 @@ import org.hisp.dhis.analytics.table.model.AnalyticsTableColumn;
 import org.hisp.dhis.analytics.table.model.AnalyticsTablePartition;
 import org.hisp.dhis.analytics.table.setting.AnalyticsTableSettings;
 import org.hisp.dhis.analytics.table.util.ColumnMapper;
+import org.hisp.dhis.analytics.table.writer.JdbcOwnershipBatchWriter;
 import org.hisp.dhis.analytics.table.writer.JdbcOwnershipWriter;
 import org.hisp.dhis.category.CategoryService;
 import org.hisp.dhis.common.IdentifiableObjectManager;
@@ -64,13 +65,11 @@ import org.hisp.dhis.configuration.ConfigurationService;
 import org.hisp.dhis.dataapproval.DataApprovalLevelService;
 import org.hisp.dhis.db.model.Logged;
 import org.hisp.dhis.db.sql.SqlBuilder;
-import org.hisp.dhis.jdbc.batchhandler.MappingBatchHandler;
 import org.hisp.dhis.organisationunit.OrganisationUnitService;
 import org.hisp.dhis.period.PeriodDataProvider;
 import org.hisp.dhis.program.Program;
 import org.hisp.dhis.resourcetable.ResourceTableService;
 import org.hisp.dhis.setting.SystemSettingsProvider;
-import org.hisp.quick.JdbcConfiguration;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -85,7 +84,6 @@ import org.springframework.transaction.annotation.Transactional;
 @Slf4j
 @Service("org.hisp.dhis.analytics.OwnershipAnalyticsTableManager")
 public class JdbcOwnershipAnalyticsTableManager extends AbstractEventJdbcTableManager {
-  private final JdbcConfiguration jdbcConfiguration;
 
   private static final String HISTORY_TABLE_ID = "1001-01-01";
 
@@ -127,7 +125,6 @@ public class JdbcOwnershipAnalyticsTableManager extends AbstractEventJdbcTableMa
       AnalyticsTableHookService tableHookService,
       PartitionManager partitionManager,
       @Qualifier("analyticsJdbcTemplate") JdbcTemplate jdbcTemplate,
-      JdbcConfiguration jdbcConfiguration,
       AnalyticsTableSettings analyticsTableSettings,
       PeriodDataProvider periodDataProvider,
       ColumnMapper columnMapper,
@@ -148,7 +145,6 @@ public class JdbcOwnershipAnalyticsTableManager extends AbstractEventJdbcTableMa
         columnMapper,
         sqlBuilder,
         configurationService);
-    this.jdbcConfiguration = jdbcConfiguration;
   }
 
   @Override
@@ -206,15 +202,9 @@ public class JdbcOwnershipAnalyticsTableManager extends AbstractEventJdbcTableMa
     List<String> columnNames =
         getColumns().stream().map(AnalyticsTableColumn::getName).collect(toList());
 
-    try (MappingBatchHandler batchHandler =
-        MappingBatchHandler.builder()
-            .jdbcConfiguration(jdbcConfiguration)
-            .tableName(tableName)
-            .columns(columnNames)
-            .build()) {
-      batchHandler.init();
-
-      JdbcOwnershipWriter writer = JdbcOwnershipWriter.getInstance(batchHandler);
+    try (JdbcOwnershipBatchWriter batchWriter =
+        new JdbcOwnershipBatchWriter(jdbcTemplate, tableName, columnNames)) {
+      JdbcOwnershipWriter writer = JdbcOwnershipWriter.getInstance(batchWriter);
       AtomicInteger queryRowCount = new AtomicInteger();
 
       jdbcTemplate.query(
@@ -226,7 +216,7 @@ public class JdbcOwnershipAnalyticsTableManager extends AbstractEventJdbcTableMa
 
       log.info(
           "OwnershipAnalytics query row count was {} for table '{}'", queryRowCount, tableName);
-      batchHandler.flush();
+      batchWriter.flush();
     } catch (Exception ex) {
       log.error("Failed to alter table ownership: ", ex);
     }

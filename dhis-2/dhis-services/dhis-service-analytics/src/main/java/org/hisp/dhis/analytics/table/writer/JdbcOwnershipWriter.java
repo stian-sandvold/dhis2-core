@@ -42,7 +42,6 @@ import java.util.Map;
 import java.util.Objects;
 import lombok.AccessLevel;
 import lombok.RequiredArgsConstructor;
-import org.hisp.dhis.jdbc.batchhandler.MappingBatchHandler;
 
 /**
  * Writer of rows to the analytics_ownership staging tables.
@@ -51,7 +50,7 @@ import org.hisp.dhis.jdbc.batchhandler.MappingBatchHandler;
  */
 @RequiredArgsConstructor(access = AccessLevel.PRIVATE)
 public class JdbcOwnershipWriter {
-  private final MappingBatchHandler batchHandler;
+  private final JdbcOwnershipBatchWriter batchWriter;
 
   /** Previous row for this TRACKED ENTITY, if any. */
   private Map<String, Object> prevRow = null;
@@ -72,8 +71,8 @@ public class JdbcOwnershipWriter {
   private static final Date FAR_FUTURE_DATE = new GregorianCalendar(9999, DECEMBER, 31).getTime();
 
   /** Gets instance by a factory method (so it can be mocked). */
-  public static JdbcOwnershipWriter getInstance(MappingBatchHandler batchHandler) {
-    return new JdbcOwnershipWriter(batchHandler);
+  public static JdbcOwnershipWriter getInstance(JdbcOwnershipBatchWriter batchWriter) {
+    return new JdbcOwnershipWriter(batchWriter);
   }
 
   /**
@@ -142,7 +141,7 @@ public class JdbcOwnershipWriter {
    * it is the last for this TRACKED ENTITY.
    */
   private void writePreviousRow() {
-    batchHandler.addObject(prevRow);
+    batchWriter.addObject(prevRow);
 
     newRow.put(STARTDATE, addDays((Date) prevRow.get(ENDDATE), 1));
 
@@ -165,7 +164,7 @@ public class JdbcOwnershipWriter {
       row.put(ENDDATE, FAR_FUTURE_DATE);
 
       if (!FAR_PAST_DATE.equals(row.get(STARTDATE))) {
-        batchHandler.addObject(row);
+        batchWriter.addObject(row);
       }
 
       prevRow = null;
