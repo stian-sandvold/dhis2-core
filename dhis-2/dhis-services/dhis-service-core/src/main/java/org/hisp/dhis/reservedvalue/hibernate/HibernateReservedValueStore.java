@@ -39,11 +39,11 @@ import lombok.extern.slf4j.Slf4j;
 import org.hibernate.query.Query;
 import org.hisp.dhis.common.Objects;
 import org.hisp.dhis.hibernate.HibernateGenericStore;
-import org.hisp.dhis.jdbc.batchhandler.ReservedValueBatchHandler;
+import org.hisp.dhis.jdbc.bulk.PostgresBulkInsert;
+import org.hisp.dhis.jdbc.bulk.PostgresBulkInsert.Column;
+import org.hisp.dhis.jdbc.bulk.PostgresBulkInsert.ColumnType;
 import org.hisp.dhis.reservedvalue.ReservedValue;
 import org.hisp.dhis.reservedvalue.ReservedValueStore;
-import org.hisp.quick.BatchHandler;
-import org.hisp.quick.BatchHandlerFactory;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
@@ -55,18 +55,28 @@ import org.springframework.stereotype.Repository;
 @Slf4j
 public class HibernateReservedValueStore extends HibernateGenericStore<ReservedValue>
     implements ReservedValueStore {
-  private final BatchHandlerFactory batchHandlerFactory;
+  private final PostgresBulkInsert bulkInsert;
+
+  /** Target columns, in the order the legacy {@code ReservedValueBatchHandler} wrote them. */
+  private static final List<Column> COLUMNS =
+      List.of(
+          new Column("ownerobject", ColumnType.TEXT),
+          new Column("owneruid", ColumnType.TEXT),
+          new Column("key", ColumnType.TEXT),
+          new Column("value", ColumnType.TEXT),
+          new Column("expirydate", ColumnType.TIMESTAMP),
+          new Column("created", ColumnType.TIMESTAMP));
 
   public HibernateReservedValueStore(
       EntityManager entityManager,
       JdbcTemplate jdbcTemplate,
       ApplicationEventPublisher publisher,
-      BatchHandlerFactory batchHandlerFactory) {
+      PostgresBulkInsert bulkInsert) {
     super(entityManager, jdbcTemplate, publisher, ReservedValue.class, false);
 
-    checkNotNull(batchHandlerFactory);
+    checkNotNull(bulkInsert);
 
-    this.batchHandlerFactory = batchHandlerFactory;
+    this.bulkInsert = bulkInsert;
   }
 
   @Override
@@ -84,10 +94,8 @@ public class HibernateReservedValueStore extends HibernateGenericStore<ReservedV
 
   @Override
   public void bulkInsertReservedValues(List<ReservedValue> toAdd) {
-    try (BatchHandler<ReservedValue> batchHandler =
-        batchHandlerFactory.createBatchHandler(ReservedValueBatchHandler.class).init()) {
-      toAdd.forEach(batchHandler::addObject);
-      batchHandler.flush();
+    try {
+      bulkInsert.copyInto("reservedvalue", COLUMNS, toRows(toAdd));
     } catch (Exception e) {
       log.error("Failed to bulk insert reserved values", e);
     }
@@ -110,13 +118,26 @@ public class HibernateReservedValueStore extends HibernateGenericStore<ReservedV
 
   @Override
   public void reserveValues(List<ReservedValue> reservedValues) {
-    try (BatchHandler<ReservedValue> batchHandler =
-        batchHandlerFactory.createBatchHandler(ReservedValueBatchHandler.class).init()) {
-      reservedValues.forEach(batchHandler::addObject);
-      batchHandler.flush();
+    try {
+      bulkInsert.copyInto("reservedvalue", COLUMNS, toRows(reservedValues));
     } catch (Exception e) {
       log.error("Failed to reserve values", e);
     }
+  }
+
+  private static List<Object[]> toRows(List<ReservedValue> values) {
+    return values.stream()
+        .map(
+            v ->
+                new Object[] {
+                  v.getOwnerObject(),
+                  v.getOwnerUid(),
+                  v.getKey(),
+                  v.getValue(),
+                  v.getExpiryDate(),
+                  v.getCreated()
+                })
+        .toList();
   }
 
   @Override

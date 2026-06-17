@@ -29,6 +29,7 @@
  */
 package org.hisp.dhis.dataanalysis;
 
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Date;
 import java.util.EnumSet;
@@ -42,16 +43,16 @@ import org.hisp.dhis.category.CategoryOptionCombo;
 import org.hisp.dhis.common.ValueType;
 import org.hisp.dhis.dataelement.DataElement;
 import org.hisp.dhis.datavalue.DeflatedDataValue;
-import org.hisp.dhis.jdbc.batchhandler.MinMaxDataElementBatchHandler;
-import org.hisp.dhis.minmax.MinMaxDataElement;
+import org.hisp.dhis.jdbc.bulk.PostgresBulkInsert;
+import org.hisp.dhis.jdbc.bulk.PostgresBulkInsert.Column;
+import org.hisp.dhis.jdbc.bulk.PostgresBulkInsert.ColumnType;
 import org.hisp.dhis.minmax.MinMaxDataElementService;
 import org.hisp.dhis.organisationunit.OrganisationUnit;
 import org.hisp.dhis.period.Period;
 import org.hisp.dhis.system.util.MathUtils;
-import org.hisp.quick.BatchHandler;
-import org.hisp.quick.BatchHandlerFactory;
 import org.joda.time.DateTime;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 /**
  * @author Lars Helge Overland
@@ -67,7 +68,22 @@ public class MinMaxOutlierAnalysisService implements MinMaxDataAnalysisService {
 
   private final MinMaxDataElementService minMaxDataElementService;
 
-  private final BatchHandlerFactory batchHandlerFactory;
+  private final PostgresBulkInsert bulkInsert;
+
+  /**
+   * Target columns for the bulk insert. Column order matches the legacy {@code
+   * MinMaxDataElementBatchHandler}. {@code minmaxdataelementid} is omitted: it has a DB default
+   * ({@code nextval('hibernate_sequence')}, see migration V2_43_5), so the database assigns it —
+   * same as the modern {@code HibernateMinMaxDataElementStore.upsertValues}.
+   */
+  private static final List<Column> COLUMNS =
+      List.of(
+          new Column("sourceid", ColumnType.INT8),
+          new Column("dataelementid", ColumnType.INT8),
+          new Column("categoryoptioncomboid", ColumnType.INT8),
+          new Column("minimumvalue", ColumnType.INT4),
+          new Column("maximumvalue", ColumnType.INT4),
+          new Column("generatedvalue", ColumnType.BOOLEAN));
 
   // -------------------------------------------------------------------------
   // DataAnalysisService implementation
@@ -97,6 +113,7 @@ public class MinMaxOutlierAnalysisService implements MinMaxDataAnalysisService {
   }
 
   @Override
+  @Transactional
   public void generateMinMaxValues(
       OrganisationUnit orgUnit, Collection<DataElement> dataElements, Double stdDevFactor) {
     log.info(
@@ -110,8 +127,7 @@ public class MinMaxOutlierAnalysisService implements MinMaxDataAnalysisService {
 
     log.debug("Deleted existing min-max values");
 
-    BatchHandler<MinMaxDataElement> batchHandler =
-        batchHandlerFactory.createBatchHandler(MinMaxDataElementBatchHandler.class).init();
+    List<Object[]> rows = new ArrayList<>();
 
     for (DataElement dataElement : dataElements) {
       if (dataElement.getValueType().isNumeric()) {
@@ -139,19 +155,21 @@ public class MinMaxOutlierAnalysisService implements MinMaxDataAnalysisService {
             max = Math.min(0, max); // Cannot be > 0
           }
 
-          OrganisationUnit ou = new OrganisationUnit();
-          ou.setId(measures.getOrgUnitId());
-
-          CategoryOptionCombo coc = new CategoryOptionCombo();
-          coc.setId(measures.getCategoryOptionComboId());
-
-          batchHandler.addObject(new MinMaxDataElement(dataElement, ou, coc, min, max, true));
+          rows.add(
+              new Object[] {
+                measures.getOrgUnitId(),
+                dataElement.getId(),
+                measures.getCategoryOptionComboId(),
+                min,
+                max,
+                true
+              });
         }
       }
     }
 
-    log.info("Min-max value generation done");
+    bulkInsert.copyInto("minmaxdataelement", COLUMNS, rows);
 
-    batchHandler.flush();
+    log.info("Min-max value generation done");
   }
 }
