@@ -29,6 +29,8 @@
  */
 package org.hisp.dhis.dataanalysis;
 
+import java.sql.Array;
+import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.util.ArrayList;
@@ -51,8 +53,8 @@ import org.hisp.dhis.organisationunit.OrganisationUnit;
 import org.hisp.dhis.period.Period;
 import org.hisp.dhis.system.util.MathUtils;
 import org.joda.time.DateTime;
-import org.springframework.jdbc.core.BatchPreparedStatementSetter;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceUtils;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -72,19 +74,17 @@ public class MinMaxOutlierAnalysisService implements MinMaxDataAnalysisService {
 
   private final JdbcTemplate jdbcTemplate;
 
-  /** Max rows per JDBC batch flush; keeps memory bounded for large generations. */
-  private static final int INSERT_BATCH_SIZE = 1000;
-
   /**
-   * Column order matches the legacy {@code MinMaxDataElementBatchHandler}. {@code
-   * minmaxdataelementid} is omitted: it has a DB default ({@code nextval('hibernate_sequence')},
-   * see migration V2_43_5), so the database assigns it — same as the modern {@code
-   * HibernateMinMaxDataElementStore.upsertValues}.
+   * Set-based insert: each column is passed as one array parameter and expanded with {@code
+   * unnest}, so the whole batch is a single statement with a single parse. Column order matches the
+   * legacy {@code MinMaxDataElementBatchHandler}. {@code minmaxdataelementid} is omitted: it has a
+   * DB default ({@code nextval('hibernate_sequence')}, see migration V2_43_5), so the database
+   * assigns it — same as the modern {@code HibernateMinMaxDataElementStore.upsertValues}.
    */
   private static final String INSERT_SQL =
       "insert into minmaxdataelement "
           + "(sourceid, dataelementid, categoryoptioncomboid, minimumvalue, maximumvalue, generatedvalue) "
-          + "values (?, ?, ?, ?, ?, ?)";
+          + "select * from unnest(?::bigint[], ?::bigint[], ?::bigint[], ?::int[], ?::int[], ?::boolean[])";
 
   // -------------------------------------------------------------------------
   // DataAnalysisService implementation
@@ -173,35 +173,54 @@ public class MinMaxOutlierAnalysisService implements MinMaxDataAnalysisService {
   }
 
   /**
-   * Bulk-inserts the generated min-max values via the Spring transaction-bound connection (chunked
-   * {@code batchUpdate}), replacing the legacy {@code org.hisp.quick.BatchHandler}. The delete
-   * (above) and this insert now run in one {@code @Transactional} method, so a failure rolls both
-   * back — previously the delete committed separately and a failed insert left the data elements
-   * with no min-max values at all.
+   * Bulk-inserts the generated min-max values via the Spring transaction-bound connection using a
+   * single set-based {@code INSERT ... SELECT * FROM unnest(...)}: every column is bound as one
+   * typed array, so the whole batch is one statement with one parse, replacing the legacy {@code
+   * org.hisp.quick.BatchHandler}. The delete (above) and this insert now run in one {@code
+   * @Transactional} method, so a failure rolls both back — previously the delete committed
+   * separately and a failed insert left the data elements with no min-max values at all.
    */
   private void insertMinMaxValues(List<MinMaxDataElement> values) {
-    for (int from = 0; from < values.size(); from += INSERT_BATCH_SIZE) {
-      List<MinMaxDataElement> batch =
-          values.subList(from, Math.min(from + INSERT_BATCH_SIZE, values.size()));
-      jdbcTemplate.batchUpdate(
-          INSERT_SQL,
-          new BatchPreparedStatementSetter() {
-            @Override
-            public void setValues(PreparedStatement ps, int i) throws SQLException {
-              MinMaxDataElement e = batch.get(i);
-              ps.setLong(1, e.getSource().getId());
-              ps.setLong(2, e.getDataElement().getId());
-              ps.setLong(3, e.getOptionCombo().getId());
-              ps.setInt(4, e.getMin());
-              ps.setInt(5, e.getMax());
-              ps.setBoolean(6, e.isGenerated());
-            }
-
-            @Override
-            public int getBatchSize() {
-              return batch.size();
-            }
-          });
+    if (values.isEmpty()) {
+      return;
     }
+
+    int n = values.size();
+    Long[] sources = new Long[n];
+    Long[] dataElements = new Long[n];
+    Long[] optionCombos = new Long[n];
+    Integer[] mins = new Integer[n];
+    Integer[] maxes = new Integer[n];
+    Boolean[] generated = new Boolean[n];
+
+    for (int i = 0; i < n; i++) {
+      MinMaxDataElement e = values.get(i);
+      sources[i] = e.getSource().getId();
+      dataElements[i] = e.getDataElement().getId();
+      optionCombos[i] = e.getOptionCombo().getId();
+      mins[i] = e.getMin();
+      maxes[i] = e.getMax();
+      generated[i] = e.isGenerated();
+    }
+
+    Connection connection = DataSourceUtils.getConnection(jdbcTemplate.getDataSource());
+    try (PreparedStatement ps = connection.prepareStatement(INSERT_SQL)) {
+      ps.setArray(1, toArray(connection, "bigint", sources));
+      ps.setArray(2, toArray(connection, "bigint", dataElements));
+      ps.setArray(3, toArray(connection, "bigint", optionCombos));
+      ps.setArray(4, toArray(connection, "int4", mins));
+      ps.setArray(5, toArray(connection, "int4", maxes));
+      ps.setArray(6, toArray(connection, "boolean", generated));
+      ps.executeUpdate();
+    } catch (SQLException ex) {
+      throw new IllegalStateException("Failed to insert generated min-max values", ex);
+    } finally {
+      DataSourceUtils.releaseConnection(connection, jdbcTemplate.getDataSource());
+    }
+  }
+
+  private static Array toArray(Connection connection, String pgType, Object[] values)
+      throws SQLException {
+    return connection.createArrayOf(pgType, values);
   }
 }
