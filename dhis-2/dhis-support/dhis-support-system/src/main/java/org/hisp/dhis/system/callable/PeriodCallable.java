@@ -46,7 +46,7 @@ public class PeriodCallable implements Callable<Period> {
 
   @Override
   public Period call() throws ExecutionException {
-    return periodService.reloadIsoPeriodInStatelessSession(id);
+    return periodService.reloadIsoPeriod(id);
   }
 
   public PeriodCallable setId(String id) {

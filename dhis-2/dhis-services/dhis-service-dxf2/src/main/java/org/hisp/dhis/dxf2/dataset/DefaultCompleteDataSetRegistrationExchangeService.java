@@ -33,8 +33,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.sql.Timestamp;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Date;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.Callable;
@@ -71,7 +74,6 @@ import org.hisp.dhis.feedback.ErrorMessage;
 import org.hisp.dhis.i18n.I18n;
 import org.hisp.dhis.i18n.I18nManager;
 import org.hisp.dhis.importexport.ImportStrategy;
-import org.hisp.dhis.jdbc.batchhandler.CompleteDataSetRegistrationBatchHandler;
 import org.hisp.dhis.message.MessageService;
 import org.hisp.dhis.organisationunit.OrganisationUnit;
 import org.hisp.dhis.organisationunit.OrganisationUnitGroup;
@@ -87,9 +89,8 @@ import org.hisp.dhis.user.User;
 import org.hisp.dhis.user.UserDetails;
 import org.hisp.dhis.user.UserService;
 import org.hisp.dhis.util.DateUtils;
-import org.hisp.quick.BatchHandler;
-import org.hisp.quick.BatchHandlerFactory;
 import org.hisp.staxwax.factory.XMLFactory;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -117,7 +118,13 @@ public class DefaultCompleteDataSetRegistrationExchangeService
 
   private final I18nManager i18nManager;
 
-  private final BatchHandlerFactory batchHandlerFactory;
+  /**
+   * Spring-managed JdbcTemplate used for all CDSR writes. Unlike the former quick BatchHandler,
+   * this template participates in the caller's @Transactional context, so newly-created periods
+   * committed inside the same transaction are immediately visible — eliminating the FK-violation
+   * race that DHIS2-21617 / DHIS2-7539 worked around.
+   */
+  private final JdbcTemplate jdbcTemplate;
 
   private final SystemSettingsProvider settingsProvider;
 
@@ -247,16 +254,10 @@ public class DefaultCompleteDataSetRegistrationExchangeService
       ImportOptions importOptions,
       Callable<CompleteDataSetRegistrations> deserializeRegistrations) {
 
-    try (BatchHandler<CompleteDataSetRegistration> batchHandler =
-        batchHandlerFactory.createBatchHandler(CompleteDataSetRegistrationBatchHandler.class)) {
+    try (CdsrJdbcWriter writer = new CdsrJdbcWriter(jdbcTemplate)) {
       CompleteDataSetRegistrations completeDataSetRegistrations = deserializeRegistrations.call();
-      ImportSummary summary =
-          saveCompleteDataSetRegistrations(
-              importOptions, completeDataSetRegistrations, batchHandler);
-
-      batchHandler.flush();
-
-      return summary;
+      return saveCompleteDataSetRegistrations(importOptions, completeDataSetRegistrations, writer);
+      // writer.close() flushes the insert buffer on try-with-resources exit
     } catch (Exception ex) {
       log.error("Complete data set registrations could not be saved.");
       return handleImportError(ex);
@@ -376,7 +377,7 @@ public class DefaultCompleteDataSetRegistrationExchangeService
   private ImportSummary saveCompleteDataSetRegistrations(
       ImportOptions importOptions,
       CompleteDataSetRegistrations completeRegistrations,
-      BatchHandler<CompleteDataSetRegistration> batchHandler) {
+      CdsrJdbcWriter writer) {
     Clock clock =
         new Clock(log).startClock().logTime("Starting complete data set registration import");
 
@@ -414,8 +415,7 @@ public class DefaultCompleteDataSetRegistrationExchangeService
     // ---------------------------------------------------------------------
 
     int totalCount =
-        batchImport(
-            completeRegistrations, cfg, importSummary, metaDataCallables, caches, batchHandler);
+        batchImport(completeRegistrations, cfg, importSummary, metaDataCallables, caches, writer);
 
     ImportCount count = importSummary.getImportCount();
 
@@ -438,13 +438,11 @@ public class DefaultCompleteDataSetRegistrationExchangeService
       ImportSummary summary,
       MetadataCallables mdCallables,
       MetadataCaches mdCaches,
-      BatchHandler<CompleteDataSetRegistration> batchHandler) {
+      CdsrJdbcWriter writer) {
 
     UserDetails currentUser = CurrentUserUtil.getCurrentUserDetails();
     final String currentUserName = currentUser.getUsername();
     final I18n i18n = i18nManager.getI18n();
-
-    batchHandler.init();
 
     int importCount = 0, updateCount = 0, deleteCount = 0, totalCount = 0;
 
@@ -551,14 +549,13 @@ public class DefaultCompleteDataSetRegistrationExchangeService
       CompleteDataSetRegistration internalCdsr =
           createCompleteDataSetRegistration(cdsr, mdProps, now, storedBy);
 
-      CompleteDataSetRegistration existingCdsr =
-          config.isSkipExistingCheck() ? null : batchHandler.findObject(internalCdsr);
+      boolean exists = !config.isSkipExistingCheck() && writer.exists(internalCdsr);
 
       ImportStrategy strategy = config.getStrategy();
 
       boolean isDryRun = config.isDryRun();
 
-      if (!config.isSkipExistingCheck() && existingCdsr != null) {
+      if (exists) {
         // CDSR already exists
 
         if (strategy.isCreateAndUpdate() || strategy.isUpdate() || strategy.isSync()) {
@@ -567,7 +564,7 @@ public class DefaultCompleteDataSetRegistrationExchangeService
           updateCount++;
 
           if (!isDryRun) {
-            batchHandler.updateObject(internalCdsr);
+            writer.updateObject(internalCdsr);
           }
         } else if (strategy.isDelete()) {
           // TODO Does 'delete' even make sense for CDSR?
@@ -577,38 +574,24 @@ public class DefaultCompleteDataSetRegistrationExchangeService
           deleteCount++;
 
           if (!isDryRun) {
-            batchHandler.deleteObject(internalCdsr);
+            writer.deleteObject(internalCdsr);
           }
         }
-      } else {
-        // CDSR does not already exist
+      } else if (strategy.isCreateAndUpdate() || strategy.isCreate() || strategy.isSync()) {
+        // CDSR does not already exist -> add new CDSR
 
-        if (strategy.isCreateAndUpdate() || strategy.isCreate() || strategy.isSync()) {
-          if (existingCdsr != null) {
-            // Already exists -> update
+        boolean added = false;
 
-            importCount++;
+        if (!isDryRun) {
+          added = writer.addObject(internalCdsr);
 
-            if (!isDryRun) {
-              batchHandler.updateObject(internalCdsr);
-            }
-          } else {
-            // Does not exist -> add new CDSR
-
-            boolean added = false;
-
-            if (!isDryRun) {
-              added = batchHandler.addObject(internalCdsr);
-
-              if (added) {
-                sendNotifications(config, internalCdsr);
-              }
-            }
-
-            if (isDryRun || added) {
-              importCount++;
-            }
+          if (added) {
+            sendNotifications(config, internalCdsr);
           }
+        }
+
+        if (isDryRun || added) {
+          importCount++;
         }
       }
     }
@@ -816,6 +799,163 @@ public class DefaultCompleteDataSetRegistrationExchangeService
   // -----------------------------------------------------------------
   // Internal classes
   // -----------------------------------------------------------------
+
+  /**
+   * Replaces the quick {@code BatchHandler<CompleteDataSetRegistration>} with Spring {@link
+   * JdbcTemplate}-based SQL that participates in the caller's {@code @Transactional} context.
+   *
+   * <p>Why this matters: the old {@code BatchHandler} opened its own raw JDBC connection with
+   * {@code autoCommit=true}, so it could not see periods created inside the surrounding Spring
+   * transaction (DHIS2-21617 / DHIS2-7539). This writer uses the transaction-bound connection, so
+   * newly-created periods are always visible. It also means all inserts roll back together if the
+   * import transaction is rolled back — a correctness improvement over the old approach.
+   *
+   * <p>Performance: batch inserts are preserved via {@link JdbcTemplate#batchUpdate}. The Spring
+   * template overhead per-call is negligible (a thin wrapper around the connection).
+   *
+   * <p>Memory: the insert buffer is flushed automatically every {@link #BATCH_SIZE} rows, and again
+   * on {@link #close()} (try-with-resources) for the final partial batch. This bounds heap use for
+   * arbitrarily large imports — mirroring the streaming behaviour of the quick BatchHandler, which
+   * flushed its SQL buffer every ~200&nbsp;KB. All batches run on the same transaction-bound
+   * connection, so they still commit (or roll back) atomically with the import transaction.
+   */
+  private static final class CdsrJdbcWriter implements AutoCloseable {
+
+    /**
+     * Max rows buffered before an automatic flush. Bounds heap use for very large imports (the
+     * buffer holds entity references, not just rows) instead of accumulating the whole payload.
+     * 1000 is a typical JDBC batch size and keeps the multi-row INSERT well under any statement
+     * limit while still amortising round-trips.
+     */
+    private static final int BATCH_SIZE = 1000;
+
+    /** The composite unique key (datasetid, periodid, sourceid, attributeoptioncomboid). */
+    private static final String KEY_PREDICATE =
+        "datasetid = ? AND periodid = ? AND sourceid = ? AND attributeoptioncomboid = ?";
+
+    private static final String SQL_EXISTS =
+        "SELECT 1 FROM completedatasetregistration WHERE " + KEY_PREDICATE;
+
+    private static final String SQL_INSERT =
+        "INSERT INTO completedatasetregistration"
+            + " (datasetid, periodid, sourceid, attributeoptioncomboid,"
+            + "  date, storedby, lastupdatedby, lastupdated, completed)"
+            + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
+
+    private static final String SQL_UPDATE =
+        "UPDATE completedatasetregistration"
+            + " SET date = ?, storedby = ?, lastupdatedby = ?, lastupdated = ?, completed = ?"
+            + " WHERE "
+            + KEY_PREDICATE;
+
+    private static final String SQL_DELETE =
+        "DELETE FROM completedatasetregistration WHERE " + KEY_PREDICATE;
+
+    private final JdbcTemplate jdbc;
+    private final List<CompleteDataSetRegistration> insertBuffer = new ArrayList<>();
+    // Tracks unique keys buffered in the CURRENT batch to reject duplicates; cleared on each flush
+    private final Set<String> bufferedKeys = new HashSet<>();
+
+    CdsrJdbcWriter(JdbcTemplate jdbc) {
+      this.jdbc = jdbc;
+    }
+
+    /** Whether a CDSR with this unique key already exists in the database. */
+    boolean exists(CompleteDataSetRegistration cdsr) {
+      return !jdbc.queryForList(SQL_EXISTS, keyValues(cdsr)).isEmpty();
+    }
+
+    /**
+     * Buffers a CDSR for batch INSERT, flushing automatically once the buffer reaches {@link
+     * #BATCH_SIZE} so heap use stays bounded for large imports.
+     *
+     * <p>Duplicate detection is scoped to the current (un-flushed) batch, matching the quick
+     * BatchHandler, which cleared its seen-keys set on every flush. A duplicate within the same
+     * batch is rejected here (returns {@code false}); a duplicate split across batches is caught by
+     * the {@code completedatasetregistration} primary-key constraint, exactly as it was with the
+     * BatchHandler's per-window dedup.
+     *
+     * @return {@code false} if this exact (datasetid, periodid, sourceid, aocid) combination was
+     *     already buffered in the current batch (duplicate within payload); {@code true} otherwise.
+     */
+    boolean addObject(CompleteDataSetRegistration cdsr) {
+      if (!bufferedKeys.add(uniqueKey(cdsr))) {
+        return false;
+      }
+      insertBuffer.add(cdsr);
+      if (insertBuffer.size() >= BATCH_SIZE) {
+        flush();
+      }
+      return true;
+    }
+
+    void updateObject(CompleteDataSetRegistration cdsr) {
+      jdbc.update(
+          SQL_UPDATE,
+          toTimestamp(cdsr.getDate()),
+          cdsr.getStoredBy(),
+          cdsr.getLastUpdatedBy(),
+          toTimestamp(cdsr.getLastUpdated()),
+          cdsr.getCompleted(),
+          cdsr.getDataSet().getId(),
+          cdsr.getPeriod().getId(),
+          cdsr.getSource().getId(),
+          cdsr.getAttributeOptionCombo().getId());
+    }
+
+    void deleteObject(CompleteDataSetRegistration cdsr) {
+      jdbc.update(SQL_DELETE, keyValues(cdsr));
+    }
+
+    /**
+     * Executes the currently buffered inserts as one JDBC batch and resets the buffer + seen-keys.
+     */
+    void flush() {
+      if (insertBuffer.isEmpty()) {
+        return;
+      }
+      jdbc.batchUpdate(
+          SQL_INSERT,
+          insertBuffer,
+          insertBuffer.size(),
+          (ps, r) -> {
+            ps.setLong(1, r.getDataSet().getId());
+            ps.setLong(2, r.getPeriod().getId());
+            ps.setLong(3, r.getSource().getId());
+            ps.setLong(4, r.getAttributeOptionCombo().getId());
+            ps.setTimestamp(5, toTimestamp(r.getDate()));
+            ps.setString(6, r.getStoredBy());
+            ps.setString(7, r.getLastUpdatedBy());
+            ps.setTimestamp(8, toTimestamp(r.getLastUpdated()));
+            ps.setBoolean(9, Boolean.TRUE.equals(r.getCompleted()));
+          });
+      insertBuffer.clear();
+      bufferedKeys.clear();
+    }
+
+    @Override
+    public void close() {
+      flush();
+    }
+
+    /** The four key column values, in {@link #KEY_PREDICATE} order, for use as query parameters. */
+    private static Object[] keyValues(CompleteDataSetRegistration r) {
+      return new Object[] {
+        r.getDataSet().getId(),
+        r.getPeriod().getId(),
+        r.getSource().getId(),
+        r.getAttributeOptionCombo().getId()
+      };
+    }
+
+    private static String uniqueKey(CompleteDataSetRegistration r) {
+      return Arrays.toString(keyValues(r));
+    }
+
+    private static Timestamp toTimestamp(Date date) {
+      return date != null ? new Timestamp(date.getTime()) : null;
+    }
+  }
 
   private static class MetadataProperties {
     final DataSet dataSet;

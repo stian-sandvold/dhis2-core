@@ -168,17 +168,6 @@ public class DefaultPeriodService implements PeriodService {
     return periodStore.reloadForceAddPeriod(period);
   }
 
-  /**
-   * Fix issue DHIS2-7539 If period doesn't exist in cache and database. Need to add and sync with
-   * database right away in a separate session/transaction. Otherwise will get foreign key
-   * constraint error in subsequence calls of batch.flush()
-   */
-  @Override
-  @IndirectTransactional
-  public Period reloadIsoPeriodInStatelessSession(String isoPeriod) {
-    return reloadPeriod(Period.of(isoPeriod));
-  }
-
   @Override
   @IndirectTransactional
   public Period reloadIsoPeriod(String isoPeriod) {

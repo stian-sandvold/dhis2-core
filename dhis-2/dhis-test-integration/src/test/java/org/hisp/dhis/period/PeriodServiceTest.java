@@ -235,8 +235,8 @@ class PeriodServiceTest extends PostgresIntegrationTestBase {
   }
 
   @Test
-  void testReloadPeriodInStatelessSession() {
-    Period period = periodService.reloadIsoPeriodInStatelessSession("202510");
+  void testReloadIsoPeriodCreatesPeriod() {
+    Period period = periodService.reloadIsoPeriod("202510");
     assertNotNull(period);
     removeTestPeriod("202510");
   }
