@@ -6,7 +6,11 @@
   >
 
 <hibernate-mapping>
-  <class name="org.hisp.dhis.category.CategoryCombo" table="categorycombo">
+  <!-- batch-size: coalesce one-at-a-time lazy proxy inits into IN(...) batches. Reached via
+       DataSetElement.categoryCombo and DataElement.categoryCombo. Scoped to this entity rather
+       than set globally (cf. closed PR #24380); does not touch the CategoryOption(Combo)
+       collections whose content-based equals/hashCode make global batching unsafe. -->
+  <class name="org.hisp.dhis.category.CategoryCombo" table="categorycombo" batch-size="100">
 
     <cache usage="read-write" />
 
