@@ -618,7 +618,13 @@ public class HibernateIdentifiableObjectStore<T extends BaseIdentifiableObject>
             .addPredicates(getSharingPredicates(builder))
             .addPredicate(
                 root -> builder.greaterThanOrEqualTo(root.get("lastUpdated"), lastUpdated))
-            .count(root -> builder.countDistinct(root.get("id")));
+            // Counting a literal rather than the primary key. The DISTINCT this replaces could
+            // never change the answer: the only predicates in play are the lastUpdated
+            // comparison and the sharing predicates, and the latter are jsonb expressions on
+            // the root's own sharing column, so the query has no join and the root cannot be
+            // duplicated. Counting the key column instead would keep the answer but force a
+            // heap access, because the key is not in the lastUpdated index.
+            .count(root -> builder.count(builder.literal(1)));
 
     return getCount(builder, param).intValue();
   }

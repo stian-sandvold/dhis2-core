@@ -544,6 +544,35 @@ class DataValueServiceTest extends PostgresIntegrationTestBase {
         1, dataValueService.getDataValueCountLastUpdatedBetween(getDate(1970, 1, 1), null, false));
   }
 
+  /**
+   * The count used to be a DISTINCT over the five primary-key columns. Removing the DISTINCT can
+   * only be wrong if two matching rows can collapse into one, so the values here are identical in
+   * every column the count does not key on - same value, same comment, same stored-by - and differ
+   * only in a key column. All four must still be counted.
+   */
+  @Test
+  void testGetDataValueCountCountsRowsDifferingOnlyInKeyColumns() {
+    DataValue sameDeSamePeDifferentOu =
+        new DataValue(deA, peA, ouA, optionCombo, optionCombo, "42");
+    DataValue sameDeSamePeOtherOu = new DataValue(deA, peA, ouB, optionCombo, optionCombo, "42");
+    DataValue otherDeSamePeSameOu = new DataValue(deB, peA, ouA, optionCombo, optionCombo, "42");
+    DataValue sameDeOtherPeSameOu = new DataValue(deA, peC, ouA, optionCombo, optionCombo, "42");
+
+    for (DataValue dv :
+        List.of(
+            sameDeSamePeDifferentOu,
+            sameDeSamePeOtherOu,
+            otherDeSamePeSameOu,
+            sameDeOtherPeSameOu)) {
+      dv.setStoredBy("thesameuser");
+      dv.setComment("the same comment");
+      dataValueService.addDataValue(dv);
+    }
+
+    assertEquals(
+        4, dataValueService.getDataValueCountLastUpdatedBetween(getDate(1970, 1, 1), null, false));
+  }
+
   @Test
   void testVAlidateMissingDataElement() {
     assertIllegalQueryEx(

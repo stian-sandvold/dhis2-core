@@ -262,8 +262,15 @@ public class HibernateDataValueStore extends HibernateGenericStore<DataValue>
       predicateList.add(root -> builder.lessThanOrEqualTo(root.get(LAST_UPATED), endDate));
     }
 
+    // Counting a literal rather than the root. DataValue has a composite identifier, so
+    // countDistinct(root) expanded to a DISTINCT over the five primary-key columns, which
+    // Postgres can only answer by sorting every matching row. The predicates above are all on
+    // the root's own columns and introduce no join, so no row can be counted twice.
     return getCount(
-            builder, newJpaParameters().addPredicates(predicateList).count(builder::countDistinct))
+            builder,
+            newJpaParameters()
+                .addPredicates(predicateList)
+                .count(root -> builder.count(builder.literal(1))))
         .intValue();
   }
 

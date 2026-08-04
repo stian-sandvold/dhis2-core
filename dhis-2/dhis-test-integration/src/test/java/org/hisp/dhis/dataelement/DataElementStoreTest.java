@@ -340,6 +340,26 @@ class DataElementStoreTest extends PostgresIntegrationTestBase {
     assertEquals(2, dataElementStore.getCountGeLastUpdated(dataElementA.getLastUpdated()));
   }
 
+  /**
+   * {@code getCountGeLastUpdated} used to count DISTINCT over the identifier. Dropping the DISTINCT
+   * is only safe if no matching root can be counted twice, so this saves several objects that all
+   * satisfy the lastUpdated predicate and are otherwise as alike as the store allows. Every one of
+   * them must be counted.
+   */
+  @Test
+  void testGetCountGeLastUpdatedCountsEveryMatchingObject() {
+    Date before = new Date(0L);
+
+    for (char c : new char[] {'A', 'B', 'C', 'D', 'E'}) {
+      DataElement dataElement = createDataElement(c);
+      dataElement.setDescription("identical in every non-key column");
+      dataElementStore.save(dataElement);
+    }
+
+    assertEquals(5, dataElementStore.getCountGeLastUpdated(before));
+    assertEquals(dataElementStore.getCount(), dataElementStore.getCountGeLastUpdated(before));
+  }
+
   @Test
   void testExistsByUser() {
     User userA = createAndAddUser("userA");
