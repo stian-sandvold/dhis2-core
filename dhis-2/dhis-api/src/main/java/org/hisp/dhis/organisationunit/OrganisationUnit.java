@@ -761,6 +761,14 @@ public class OrganisationUnit extends BaseDimensionalItemObject
   }
 
   public void setParent(OrganisationUnit parent) {
+    if (this.parent != parent) {
+      // The ancestor chain determines path and hierarchyLevel, so a new parent invalidates both
+      // memos. Reference comparison is deliberate: it never initialises a lazy proxy, and a
+      // re-assignment of the identical instance cannot change the chain.
+      this.path = null;
+      this.hierarchyLevel = null;
+    }
+
     this.parent = parent;
   }
 
@@ -777,15 +785,42 @@ public class OrganisationUnit extends BaseDimensionalItemObject
   }
 
   /**
-   * Note that the {@code path} property is mapped with the "property access" mode. This method will
-   * calculate and return the path property value based on the org unit ancestors. To access the
-   * {@code path} property directly, use {@link OrganisationUnit#getStoredPath}.
+   * Hibernate reads mapped properties through their getters — {@code default-access} is {@code
+   * property} for every {@code .hbm.xml} in the codebase — so this method runs on every dirty
+   * check, cascade and flush of a managed organisation unit. Walking the ancestor chain on each of
+   * those reads is what made a {@code dataValueSets} import quadratic: every ancestor is typically
+   * an uninitialised proxy, and {@link OrganisationUnit#getUid()} on a proxy issues a {@code
+   * SELECT}.
+   *
+   * <p>The value is therefore memoised in the {@code path} field, which is also the field Hibernate
+   * hydrates from the {@code path} column. The memo is invalidated by {@link
+   * OrganisationUnit#setParent} — the only way the ancestor chain can change — so a re-parented
+   * unit still recomputes and still persists the new path. {@link OrganisationUnit#updatePath}
+   * forces a recompute for callers repairing a path that is present but known to be stale.
+   *
+   * <p>To read the persisted value without ever triggering a recompute, use {@link
+   * OrganisationUnit#getStoredPath}.
+   *
+   * <p>Mapped {@code READ_ONLY} for the same reason {@link OrganisationUnit#getLevel()} is: the
+   * path is derived from the hierarchy and must never come from a request payload. Without this,
+   * {@code {"path": "/anything"}} in a metadata payload reaches {@code setPath} and is then
+   * returned by both this method and {@link OrganisationUnit#getStoredPath} — and {@code
+   * getStoredPath()} feeds ACL hierarchy checks and {@code path LIKE ?} predicates.
    *
    * @return the path.
    */
-  @JsonProperty
+  @JsonProperty(access = JsonProperty.Access.READ_ONLY)
   @JacksonXmlProperty(namespace = DxfNamespaces.DXF_2_0)
   public String getPath() {
+    if (path == null) {
+      path = computePath();
+    }
+
+    return path;
+  }
+
+  /** Builds the path by walking the ancestor chain. See {@link OrganisationUnit#getPath}. */
+  private String computePath() {
     List<String> pathList = new ArrayList<>();
     Set<String> visitedSet = new HashSet<>();
     OrganisationUnit unit = parent;
@@ -830,18 +865,38 @@ public class OrganisationUnit extends BaseDimensionalItemObject
   }
 
   /**
-   * Note that the {@code path} property is mapped with the "property access" mode. This method is
-   * for unit testing purposes only.
+   * Discards the memoised {@code path} and {@code hierarchyLevel} and recomputes both from the
+   * ancestor chain. {@link OrganisationUnit#setParent} already does this, so the only callers that
+   * need it are those repairing a value that is present but known to be stale — chiefly {@code
+   * OrganisationUnitStore.forceUpdatePaths()} — and tests building a hierarchy by hand.
    */
   public void updatePath() {
-    setPath(getPath());
+    this.path = null;
+    this.hierarchyLevel = null;
+
+    getPath();
+    getHierarchyLevel();
   }
 
   /**
    * Used by persistence layer. Purpose is to have a column for use in database queries. For
    * application use see {@link OrganisationUnit#getLevel()} which has better performance.
+   *
+   * <p>Memoised on the same terms as {@link OrganisationUnit#getPath} — see that method for why.
    */
   public Integer getHierarchyLevel() {
+    if (hierarchyLevel == null) {
+      hierarchyLevel = computeHierarchyLevel();
+    }
+
+    return hierarchyLevel;
+  }
+
+  /**
+   * Counts the distinct units in the ancestor chain, including this one. See {@link
+   * OrganisationUnit#getHierarchyLevel}.
+   */
+  private Integer computeHierarchyLevel() {
     Set<String> uids = Sets.newHashSet(uid);
 
     OrganisationUnit current = this;
@@ -854,9 +909,7 @@ public class OrganisationUnit extends BaseDimensionalItemObject
       }
     }
 
-    hierarchyLevel = uids.size();
-
-    return hierarchyLevel;
+    return uids.size();
   }
 
   /** Do not set directly. */

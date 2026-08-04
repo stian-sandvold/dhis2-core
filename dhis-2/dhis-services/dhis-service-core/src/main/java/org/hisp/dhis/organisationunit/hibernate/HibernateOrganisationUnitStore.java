@@ -306,6 +306,9 @@ public class HibernateOrganisationUnitStore
 
   @Override
   public void updatePaths() {
+    // Loading is the whole repair: a NULL path hydrates as NULL, OrganisationUnit.getPath()
+    // computes
+    // it on the dirty check, and the flush writes it back. Nothing else is needed here.
     getQuery("from OrganisationUnit ou where ou.path is null or ou.hierarchyLevel is null").list();
   }
 
@@ -313,6 +316,12 @@ public class HibernateOrganisationUnitStore
   public void forceUpdatePaths() {
     List<OrganisationUnit> organisationUnits =
         new ArrayList<>(getQuery("from OrganisationUnit").list());
+
+    // Force the recompute explicitly. Loading alone is enough to repair a NULL path (see
+    // updatePaths() above), but a path that is present and stale is only rewritten if the value is
+    // recomputed first -- OrganisationUnit.getPath() memoises the hydrated value.
+    organisationUnits.forEach(OrganisationUnit::updatePath);
+
     updatePaths(organisationUnits);
   }
 
