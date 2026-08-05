@@ -59,6 +59,7 @@ import java.util.Collections;
 import java.util.Date;
 import java.util.List;
 import java.util.function.Consumer;
+import org.apache.commons.lang3.StringUtils;
 import org.hisp.dhis.analytics.TimeField;
 import org.hisp.dhis.analytics.analyze.ExecutionPlanStore;
 import org.hisp.dhis.analytics.event.EventQueryParams;
@@ -71,6 +72,7 @@ import org.hisp.dhis.common.Grid;
 import org.hisp.dhis.common.QueryItem;
 import org.hisp.dhis.common.QueryOperator;
 import org.hisp.dhis.common.RepeatableStageParams;
+import org.hisp.dhis.common.RequestTypeAware;
 import org.hisp.dhis.common.ValueType;
 import org.hisp.dhis.db.sql.PostgreSqlAnalyticsSqlBuilder;
 import org.hisp.dhis.db.sql.PostgreSqlBuilder;
@@ -226,6 +228,101 @@ class EnrollmentAnalyticsManagerTest extends EventAnalyticsTest {
     verifyWithRepeatableProgramStageAndDataElement(ValueType.TEXT);
   }
 
+  /**
+   * The aggregated-enrollments query wraps its own select clause in an outer count, and that select
+   * clause goes through the same row-context handling. Every assembly that emits columns reading
+   * from a lateral join has to emit the join as well - otherwise the SQL references a table that is
+   * not in the query. This asserts they stay in step.
+   */
+  @Test
+  void verifyAggregatedEnrollmentsWithRowContextEmitsTheLateralItReadsFrom() {
+    EventQueryParams params =
+        new EventQueryParams.Builder(createRequestParams(repeatableProgramStage, ValueType.TEXT))
+            .withEndpointAction(RequestTypeAware.EndpointAction.AGGREGATE)
+            .withEndpointItem(RequestTypeAware.EndpointItem.ENROLLMENT)
+            .build();
+
+    subject.getEnrollments(params, new ListGrid(), 100);
+
+    verify(jdbcTemplate).queryForRowSet(sql.capture());
+
+    String generated = sql.getValue();
+
+    // The select list reads three columns off the lateral; the lateral must be declared once.
+    assertEquals(
+        3,
+        StringUtils.countMatches(generated, "\"rowcontext_0\"."),
+        "expected value, exists and status to read from the lateral: " + generated);
+    assertEquals(
+        1,
+        StringUtils.countMatches(generated, "as \"rowcontext_0\" on true"),
+        "the lateral the select list reads from must be joined in: " + generated);
+  }
+
+  /**
+   * The point of the grouping. Every data element on the same repeatable stage generates the same
+   * subquery apart from the expression it selects, so they share one lateral and one evaluation of
+   * it: Uganda's traced request has 18 of them and used to emit 54 correlated subselects, then 18
+   * joins, and now emits one. Goes red if the grouping is removed - each item would take its own
+   * {@code rowcontext_<n>} and its own join.
+   */
+  @Test
+  void verifyRepeatableStageDataElementsShareOneLateral() {
+    EventQueryParams params =
+        new EventQueryParams.Builder(createRequestParams(repeatableProgramStage, ValueType.TEXT))
+            .addItem(repeatableStageItem("bBk3nGGkNbF"))
+            .addItem(repeatableStageItem("cCk3nGGkNbG"))
+            .build();
+
+    subject.getEnrollments(params, new ListGrid(), 100);
+
+    verify(jdbcTemplate).queryForRowSet(sql.capture());
+
+    String generated = sql.getValue();
+
+    assertEquals(
+        1,
+        StringUtils.countMatches(generated, "left join lateral"),
+        "three data elements on one stage must share one lateral: " + generated);
+    assertEquals(
+        1,
+        StringUtils.countMatches(generated, "order by occurreddate desc"),
+        "the subquery must be evaluated once: " + generated);
+    assertEquals(
+        0,
+        StringUtils.countMatches(generated, "rowcontext_1"),
+        "a second lateral means the grouping did not happen: " + generated);
+
+    // One value column per item on the single join, and each read exactly once by the select list.
+    for (int ordinal = 0; ordinal < 3; ordinal++) {
+      assertEquals(
+          1,
+          StringUtils.countMatches(generated, "as \"v" + ordinal + "\""),
+          "expected a value column v" + ordinal + ": " + generated);
+      assertEquals(
+          1,
+          StringUtils.countMatches(generated, "\"rowcontext_0\".\"v" + ordinal + "\""),
+          "expected the select list to read v" + ordinal + ": " + generated);
+    }
+  }
+
+  /**
+   * A repeatable-stage query item for the given data element, on {@code repeatableProgramStage}.
+   */
+  private QueryItem repeatableStageItem(String dataElementUid) {
+    QueryItem item = new QueryItem(new BaseDimensionalItemObject(dataElementUid));
+    item.setProgram(programA);
+    item.setProgramStage(repeatableProgramStage);
+    item.setValueType(ValueType.TEXT);
+
+    RepeatableStageParams repeatableStageParams = new RepeatableStageParams();
+    repeatableStageParams.setDimension(repeatableProgramStage.getUid() + "[-1]." + dataElementUid);
+    repeatableStageParams.setIndex(-1);
+    item.setRepeatableStageParams(repeatableStageParams);
+
+    return item;
+  }
+
   @Test
   void verifyWithProgramStageAndTextDataElement() {
     verifyWithProgramStageAndDataElement(ValueType.TEXT);
@@ -283,64 +380,51 @@ class EnrollmentAnalyticsManagerTest extends EventAnalyticsTest {
 
     String dataElementUid = dataElementA.getUid();
 
+    // rowContext=true used to emit this subquery three times - the value, the same subquery wrapped
+    // in exists(...), and the same subquery with the column textually replaced by eventstatus - so
+    // 18 data elements produced 54 correlated subselects. It is now evaluated once in a lateral
+    // join
+    // and all three columns read from that one row.
+    String columnAlias = programStageUid + "[-1]." + dataElementUid;
+
     String expected =
         "select enrollment,trackedentity,enrollmentdate,occurreddate,storedby,createdbydisplayname,lastupdatedbydisplayname,lastupdated,ST_AsGeoJSON(enrollmentgeometry),longitude,latitude,"
             + "ouname,ounamehierarchy,oucode,enrollmentstatus,ax.\"quarterly\",ax.\"ou\","
-            + "(select \""
-            + dataElementUid
-            + "\" from analytics_event_"
-            + programUid
-            + " where analytics_event_"
-            + programUid
-            + ".eventstatus != 'SCHEDULE' and analytics_event_"
-            + programUid
-            + ".enrollment = ax.enrollment and ps = '"
-            + repeatableProgramStage.getUid()
-            + "' order by occurreddate desc, created desc offset 1 limit 1 ) "
-            + "as \""
-            + programStageUid
-            + "[-1]."
-            + dataElementUid
-            + "\", exists ((select \""
-            + dataElementUid
-            + "\" "
-            + "from analytics_event_"
-            + programUid
-            + " where analytics_event_"
-            + programUid
-            + ".eventstatus != 'SCHEDULE' and analytics_event_"
-            + programUid
-            + ".enrollment = ax.enrollment and ps = '"
-            + programStageUid
-            + "' order by occurreddate desc, created desc offset 1 limit 1 )) "
-            + "as \""
-            + programStageUid
-            + "[-1]."
-            + dataElementUid
-            + ".exists\""
-            + ",(select eventstatus "
-            + "from analytics_event_"
-            + programUid
-            + " where analytics_event_"
-            + programUid
-            + ".eventstatus != 'SCHEDULE' and analytics_event_"
-            + programUid
-            + ".enrollment = ax.enrollment and ps = '"
-            + programStageUid
-            + "' order by occurreddate desc, created desc offset 1 limit 1 ) "
-            + "as \""
-            + programStageUid
-            + "[-1]."
-            + dataElementUid
+            + "\"rowcontext_0\".\"v0\" as \""
+            + columnAlias
+            + "\","
+            + "coalesce(\"rowcontext_0\".found, false) as \""
+            + columnAlias
+            + ".exists\","
+            + "\"rowcontext_0\".eventstatus as \""
+            + columnAlias
             + ".status\"  "
             + "from analytics_enrollment_"
             + programUid
-            + " as ax where (ax.\"quarterly\" in ('2000Q1') ) and (ax.\"uidlevel1\" = 'ouabcdefghA' ) "
+            + " as ax "
+            + " left join lateral (select \""
+            + dataElementUid
+            + "\" as \"v0\", eventstatus, true as found from analytics_event_"
+            + programUid
+            + " where analytics_event_"
+            + programUid
+            + ".eventstatus != 'SCHEDULE' and analytics_event_"
+            + programUid
+            + ".enrollment = ax.enrollment and ps = '"
+            + programStageUid
+            + "' order by occurreddate desc, created desc offset 1 limit 1) as \"rowcontext_0\" on true "
+            + "where (ax.\"quarterly\" in ('2000Q1') ) and (ax.\"uidlevel1\" = 'ouabcdefghA' ) "
             + "and ps = '"
             + programStageUid
             + "' limit 101";
 
     assertEquals(expected, sql.getValue());
+
+    // The point of the change, asserted as a count rather than left implicit in the string above:
+    // the subquery is written once, and neither of the two duplicates survives.
+    assertEquals(1, StringUtils.countMatches(sql.getValue(), "left join lateral"));
+    assertEquals(1, StringUtils.countMatches(sql.getValue(), "order by occurreddate desc"));
+    assertEquals(0, StringUtils.countMatches(sql.getValue(), "exists (("));
   }
 
   @Test
